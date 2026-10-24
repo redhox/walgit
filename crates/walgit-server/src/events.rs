@@ -413,4 +413,51 @@ mod tests {
             (SHA, "0".repeat(40).as_str())
         );
     }
+
+    fn reference(name: &str, oid: &str) -> walgit_git::Ref {
+        walgit_git::Ref {
+            name: name.to_owned(),
+            oid: oid.to_owned(),
+            peeled: String::new(),
+        }
+    }
+
+    #[test]
+    fn gap_events_cover_updates_creates_and_deletes() {
+        let repo = walgit_git::RepoId::new("t", "r").unwrap();
+        let previous = vec![
+            ("refs/heads/main".to_owned(), "aaaa".to_owned()),
+            ("refs/heads/gone".to_owned(), "bbbb".to_owned()),
+        ];
+        let current = vec![
+            reference("refs/heads/main", "cccc"),
+            reference("refs/heads/new", "dddd"),
+        ];
+        let mut out = Vec::new();
+        refs_from_gap(&repo, &previous, &current, 7, &mut out);
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().any(|e| {
+            e.action == Action::Update && e.ref_name == "refs/heads/main" && e.new == "cccc"
+        }));
+        assert!(out.iter().any(|e| {
+            e.action == Action::Create
+                && e.ref_name == "refs/heads/new"
+                && e.old.chars().all(|c| c == '0')
+        }));
+        assert!(
+            out.iter()
+                .any(|e| { e.action == Action::Delete && e.ref_name == "refs/heads/gone" })
+        );
+        assert!(out.iter().all(|e| e.walgit.seq == "7"));
+    }
+
+    #[test]
+    fn gap_events_skip_unchanged_refs() {
+        let repo = walgit_git::RepoId::new("t", "r").unwrap();
+        let previous = vec![("refs/heads/main".to_owned(), "aaaa".to_owned())];
+        let current = vec![reference("refs/heads/main", "aaaa")];
+        let mut out = Vec::new();
+        refs_from_gap(&repo, &previous, &current, 8, &mut out);
+        assert!(out.is_empty());
+    }
 }
