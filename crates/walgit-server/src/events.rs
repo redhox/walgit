@@ -156,6 +156,86 @@ pub(crate) fn refs_from_entries(repo: &RepoId, entries: &[LogEntry], out: &mut V
     }
 }
 
+/// `ref` events for the refs that differ between the last published snapshot
+/// and the current refs.
+///
+/// The bridge uses this when a checkpoint folded log entries it never read: the
+/// original entries are gone, but the cursor stored the refs that were visible
+/// at `published_seq`. The synthetic events carry the checkpoint's seq, so a
+/// consumer's `(repo, seq, ref_name)` dedup still holds on a retry.
+pub(crate) fn refs_from_gap(
+    repo: &RepoId,
+    previous: &[(String, String)],
+    current: &[walgit_git::Ref],
+    seq: u64,
+    out: &mut Vec<RefEvent>,
+) {
+    let previous: std::collections::BTreeMap<&str, &str> = previous
+        .iter()
+        .map(|(name, oid)| (name.as_str(), oid.as_str()))
+        .collect();
+    let current: std::collections::BTreeMap<&str, &str> = current
+        .iter()
+        .map(|r| (r.name.as_str(), r.oid.as_str()))
+        .collect();
+    for (name, oid) in &current {
+        match previous.get(*name) {
+            Some(old) if old == oid => {}
+            Some(old) => out.push(snapshot_event(Action::Update, name, old, oid, seq, repo)),
+            None if name.starts_with("refs/") => {
+                out.push(snapshot_event(
+                    Action::Create,
+                    name,
+                    &zero_like(oid),
+                    oid,
+                    seq,
+                    repo,
+                ));
+            }
+            None => {}
+        }
+    }
+    for (name, old) in &previous {
+        if !current.contains_key(*name) {
+            out.push(snapshot_event(
+                Action::Delete,
+                name,
+                old,
+                &zero_like(old),
+                seq,
+                repo,
+            ));
+        }
+    }
+    out.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
+}
+
+fn snapshot_event(
+    action: Action,
+    name: &str,
+    old: &str,
+    new: &str,
+    seq: u64,
+    repo: &RepoId,
+) -> RefEvent {
+    RefEvent {
+        action,
+        ref_type: ref_type(name),
+        ref_name: name.to_owned(),
+        old: old.to_owned(),
+        new: new.to_owned(),
+        pusher: "walgit".to_owned(),
+        correlation_id: String::new(),
+        repo: repo.to_string(),
+        walgit: WalgitExt {
+            schema_version: 1,
+            seq: seq.to_string(),
+            entry_kind: "ref_update".to_owned(),
+            request_id: String::new(),
+        },
+    }
+}
+
 /// Where the bridge publishes: a webhook receives each batch as a JSON array,
 /// `POST`ed with `Content-Type: application/json`, a `X-Walgit-Delivery` id
 /// (sha1 of the body — the consumer's dedup key) and, when `events.webhook_secret`
